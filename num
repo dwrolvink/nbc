@@ -1,0 +1,17 @@
+#!/bin/env python3
+# simply give binary representation of a number
+import sys
+
+def format_valueblock(lead_int, bin_str):
+    return f'{lead_int} {bin_str[0:3]} {bin_str[3:]}'
+
+blocks = []
+lead = int(sys.argv[1])
+for arg in sys.argv[2:]:
+    blocks.append(format_valueblock(lead, f'{int(arg):07b}'))
+
+print(' · '.join(blocks))
+
+
+
+

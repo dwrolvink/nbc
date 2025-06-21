@@ -1,0 +1,316 @@
+#!/bin/env python3
+# simply give binary representation of a number
+import sys
+import json
+# stack = []
+
+# class Command():
+
+
+#     def handle_value(self, value):
+
+    
+#     def print(self):
+#         print(self.repr_code, '  ', self.code)
+
+# def print_stack():
+#     for cmd in stack:
+#         cmd.print()
+
+class Command():
+    def __init__(self, repr_code, code, stack):
+        self.type = "Command"
+        self.repr_code = repr_code
+        self.stack = stack
+        self.code = code
+        self.values = []
+        self.children = []
+        self.num_values_expected = 1
+        self.harvested = False
+
+        self.is_value_modifier = True
+        if self.code in ["v"]:
+            self.is_value_modifier = False
+            
+    def __str__(self):
+        return f'{self.type}({self.code})'
+    def __repr__(self):
+        return f'{self.type}({self.code})'
+    def dump(self):
+        return {
+            "type": "Command",
+            "code": self.code,
+            # "children": [ x.dump() for x in self.children ],
+            "values": [ x.dump() for x in self.values ],
+            "awaits_values": self.is_awaiting_values(),
+            "num_values_expected": self.num_values_expected
+            # "res": self.resultant_value().dump()
+        }
+
+    def depth(self, depth):
+        m = depth + 1
+        for command in self.children:
+            res = command.depth(depth + 1)
+            if res > m:
+                m = res
+        return m
+
+    def print(self, indent, depth):
+        cvalue = self.resultant_value()
+        if cvalue is not None:
+            cvalue = cvalue.print()
+        else:
+            cvalue = ''
+        print(f"{self.repr_code} {' '*indent} {self.code} {' '*((depth*2+4)-indent)}{cvalue}")
+        for command in self.children:
+            command.print(indent=indent+2, depth=depth)
+        for value in self.values:
+            if value.type == "ResultantValue":
+                continue
+            val = value.print()
+            print(f"{value.repr_code} {' '*(indent+2)} {val}")
+
+    def resultant_value(self):
+        if self.is_awaiting_values():
+            return None
+        if len(self.values) == 0:
+            return None
+        if len(self.values) == 1:
+            return self.values[0]
+        return ResultantValue(value=self.values[1:], format="list") 
+        
+
+    def is_awaiting_values(self):
+        if len(self.values) < self.num_values_expected:
+            return True
+        return False
+
+    def add_num_values_expected(self, n):
+        # if last child is awaiting values, update num expected of child
+        if len(self.children) > 0:
+            child = self.children[-1]
+            if child.is_awaiting_values():
+                child.add_num_values_expected(n)
+                return
+        # else, update num expected of self
+        self.num_values_expected += (n-1)
+
+    def add_command(self, new_command):
+        if not self.is_awaiting_values():
+            raise Exception(f"Cannot add subcommand ({new_command.code}) to command ({self.code}); not awaiting values.")
+        if len(self.children) == 0:
+            self.children.append(new_command)
+            return
+        child = self.children[-1]
+        if child.is_awaiting_values():
+            child.add_command(new_command)
+            return
+        self.children.append(new_command)
+
+    def handle_value(self, value):
+        if len(self.children) > 0:
+            last_child = self.children[-1]
+            if last_child.is_awaiting_values():
+                last_child.handle_value(value)
+                return
+        if self.code == 'n':
+            if self.num_values_expected == 1:
+                if int(value.value) <= 1:
+                    raise Exception("Value of 'n' should be 2 or higher")
+                self.num_values_expected = int(value.value) + 1
+        self.values.append(value)
+
+    def remove_resultant_values(self):
+        for value in self.values:
+            if value.type == "ResultantValue":
+                self.values.remove(value)
+
+    def rollup(self):
+        # skip if already harvested or not awaiting values anymore
+        if not self.is_awaiting_values() or self.harvested:
+            return
+            
+        # skip if no children to be harvested
+        if len(self.children) == 0:
+            return
+
+        # get last child
+        child = self.children[-1]
+
+        # if already harvested no rollup can continue
+        if child.harvested:
+            return
+
+        # rollup child, and skip if last child not rolled-up
+        child.rollup()
+        if child.is_awaiting_values():
+            return
+        
+        # not harvested and rolled-up, let's harvest resultant value
+        self.values.append(child.resultant_value())
+        child.harvested = True
+        child.remove_resultant_values()
+        return
+
+class Value():
+    def __init__(self, repr_code, value, format):
+        self.type = "Value"
+        self.repr_code = repr_code
+        self.value = value
+        self.format = format                # "literal_int" or "asci"
+
+    def __str__(self):
+        return f'{self.type}({self.value})'
+    def __repr__(self):
+        return f'{self.type}({self.value})'
+    def dump(self):
+        return f'{self.value} ({self.format})'
+    def print(self):
+        val = self.value
+        if self.format == "asci":
+            val = f'"{val}"'
+        return val
+
+class ResultantValue():
+    def __init__(self, value, format):
+        self.type = "ResultantValue"
+        self.repr_code = "- --- ----"
+        self.value = value
+        self.format = format
+
+        self.merge()
+
+    def merge(self):
+        # [todo] add int merge
+        if not self.format == "list":
+            return
+        for value in self.value:
+            if value.format != "asci":
+                return
+        self.format = "asci"
+        self.value = ''.join([x.value for x in self.value])
+
+    def print(self):
+        val = self.value
+        if self.format == "asci":
+            val = f'"{val}"'
+        if self.format == "list":
+            val=', '.join([x.print() for x in self.value])
+        return val
+    def dump(self):
+        if isinstance(self.value , list):
+            return f'{[ x.dump() for x in self.value]} ({self.format})'
+        else:
+            return self.value.dump()
+
+class Stack():
+    def __init__(self):
+        self.stack = []
+        # self.num_values_expected = 1
+        
+    def print(self):
+        for command in self.stack:
+            command.print(indent=0, depth=self.depth())
+
+    def depth(self):
+        m = 0
+        for command in self.stack:
+            res = command.depth(0)
+            if res > m:
+                m = res
+        return m
+
+
+    def dump(self):
+        return json.dumps([ x.dump() for x in self.stack ], indent=2)
+
+    def add_command(self, new_command):
+        if len(self.stack) == 0:
+            self.stack.append(new_command)
+            return
+        command = self.stack[-1]
+        if not command.is_awaiting_values():
+            self.stack.append(new_command)
+            return
+        if not new_command.is_value_modifier:
+            raise Exception(f"Cannot use {new_command} as value modifier")
+        command.add_command(new_command)
+        
+    def add_value(self, value):
+        if len(self.stack) == 0:
+            print(f"warning: can't add Value {value.value}; no open command")
+            return
+        command = self.stack[-1]
+        if not command.is_awaiting_values():
+            raise Exception(f"Value ({value.value}) added to Command ({command.code}) but command did not expect more values")
+        command.handle_value(value)
+        self.rollup()
+        
+    def handle_word(self, word):
+        if represents_int(word):
+            bin = format_block(0, f'{int(word):07b}')
+            self.add_value(Value(value=int(word), format="literal_int", repr_code=bin))
+            return
+
+        MODE="command"
+        for char in word:
+            if char in ['"', "'"]:
+                MODE="asci"
+                continue
+            if MODE == "asci":
+                bin = format_block(0, format(ord(char), '07b'))
+                self.add_value(Value(value=char, format="asci", repr_code=bin))
+                continue
+            if MODE == "command":
+                bin = format_block(1, format(ord(char), '07b'))
+                self.add_command(Command(repr_code=bin, code=char, stack=self))
+                continue
+
+    def rollup(self):
+        # during last handle_add_value, the last command (or the last child of the last command, etc) may have gotten its last value
+        # this can then lead to a resultant value that should be added to its parent
+        if len(self.stack) == 0:
+            return
+        command = self.stack[-1]
+        if not command.is_awaiting_values():
+            return
+        command.rollup()
+
+def clean_arg(arg):
+    arg = arg.replace('/', '')
+    arg = arg.replace('(', '')
+    arg = arg.replace(')', '')
+    return arg
+
+def format_block(lead_int, bin_str):
+    return f'{lead_int} {bin_str[0:3]} {bin_str[3:]}'
+
+def represents_int(s):
+    try: 
+        int(s)
+    except ValueError:
+        return False
+    else:
+        return True
+
+def main():
+    stack = Stack()
+
+    for arg in sys.argv[1:]:
+        arg = clean_arg(arg)
+        # print(arg)
+
+        for word in arg.split(" "):
+            stack.handle_word(word)
+    
+    stack.print()
+    # print(stack.dump())
+
+    print("depth:", stack.depth())
+
+main()
+
+
+    
+
+
