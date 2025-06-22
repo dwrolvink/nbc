@@ -2,20 +2,14 @@
 # simply give binary representation of a number
 import sys
 import json
-# stack = []
-
-# class Command():
+from json import JSONEncoder
 
 
-#     def handle_value(self, value):
+class bcolors:
+    LIGHTGRAY = '\033[97m'
+    DARKGRAY  = '\033[90m'
+    ENDC = '\033[0m'
 
-    
-#     def print(self):
-#         print(self.repr_code, '  ', self.code)
-
-# def print_stack():
-#     for cmd in stack:
-#         cmd.print()
 
 class Command():
     def __init__(self, repr_code, code, stack):
@@ -24,13 +18,22 @@ class Command():
         self.stack = stack
         self.code = code
         self.values = []
+        self.parent = None
         self.children = []
         self.num_values_expected = 1
         self.harvested = False
 
+        self.effects = []
+
         self.is_value_modifier = True
         if self.code in ["v"]:
             self.is_value_modifier = False
+        if self.code in ["a"]:
+            self.effects.append("INTERPRET_LITERAL_INT_AS_ASCI")
+
+    def set_parent(self, parent):
+        self.parent = parent
+        self.effects += self.parent.effects
             
     def __str__(self):
         return f'{self.type}({self.code})'
@@ -76,10 +79,9 @@ class Command():
         if len(self.values) == 0:
             return None
         if len(self.values) == 1:
-            return self.values[0]
+            return self.values[0].toResultantValue()
         return ResultantValue(value=self.values[1:], format="list") 
         
-
     def is_awaiting_values(self):
         if len(self.values) < self.num_values_expected:
             return True
@@ -95,62 +97,22 @@ class Command():
         # else, update num expected of self
         self.num_values_expected += (n-1)
 
-    def add_command(self, new_command):
-        if not self.is_awaiting_values():
-            raise Exception(f"Cannot add subcommand ({new_command.code}) to command ({self.code}); not awaiting values.")
-        if len(self.children) == 0:
-            self.children.append(new_command)
-            return
-        child = self.children[-1]
-        if child.is_awaiting_values():
-            child.add_command(new_command)
-            return
-        self.children.append(new_command)
-
     def handle_value(self, value):
-        if len(self.children) > 0:
-            last_child = self.children[-1]
-            if last_child.is_awaiting_values():
-                last_child.handle_value(value)
-                return
-        if self.code == 'n':
-            if self.num_values_expected == 1:
-                if int(value.value) <= 1:
-                    raise Exception("Value of 'n' should be 2 or higher")
-                self.num_values_expected = int(value.value) + 1
+        if "INTERPRET_LITERAL_INT_AS_ASCI" in self.effects:
+            if value.type != "ResultantValue":
+                value.toAsci()
+
         self.values.append(value)
+        if self.parent is not None:
+            self.parent.handle_value(self.resultant_value())
+            self.stack.stack.remove(self)
+        return
 
     def remove_resultant_values(self):
         for value in self.values:
             if value.type == "ResultantValue":
                 self.values.remove(value)
 
-    def rollup(self):
-        # skip if already harvested or not awaiting values anymore
-        if not self.is_awaiting_values() or self.harvested:
-            return
-            
-        # skip if no children to be harvested
-        if len(self.children) == 0:
-            return
-
-        # get last child
-        child = self.children[-1]
-
-        # if already harvested no rollup can continue
-        if child.harvested:
-            return
-
-        # rollup child, and skip if last child not rolled-up
-        child.rollup()
-        if child.is_awaiting_values():
-            return
-        
-        # not harvested and rolled-up, let's harvest resultant value
-        self.values.append(child.resultant_value())
-        child.harvested = True
-        child.remove_resultant_values()
-        return
 
 class Value():
     def __init__(self, repr_code, value, format):
@@ -158,6 +120,13 @@ class Value():
         self.repr_code = repr_code
         self.value = value
         self.format = format                # "literal_int" or "asci"
+
+    def toAsci(self):
+        if self.format == "asci":
+            return
+        if self.format == "literal_int":
+            self.format = "asci"
+            self.value = chr(self.value)
 
     def __str__(self):
         return f'{self.type}({self.value})'
@@ -170,6 +139,9 @@ class Value():
         if self.format == "asci":
             val = f'"{val}"'
         return val
+
+    def toResultantValue(self):
+        return ResultantValue(value=self.value, format=self.format)
 
 class ResultantValue():
     def __init__(self, value, format):
@@ -202,10 +174,33 @@ class ResultantValue():
             return f'{[ x.dump() for x in self.value]} ({self.format})'
         else:
             return self.value.dump()
+    def toResultantValue(self):
+        return self
+
+
+class Block():
+    def __init__(self, repr_code="- --- ----", value=None):
+        self.repr_code = repr_code
+        self.value = value
+
+
+class Encoder(JSONEncoder):
+    def default(self, o):
+        return o.__dict__
+
+class Message():
+    def __init__(self, repr_code="- --- ----", value=None):
+        self.header_blocks = []
+        self.blocks = []
+        self.repr_code = repr_code
+        self.value = value
 
 class Stack():
     def __init__(self):
         self.stack = []
+        self.blocks = []
+        self.messages = []
+
         # self.num_values_expected = 1
         
     def print(self):
@@ -225,16 +220,16 @@ class Stack():
         return json.dumps([ x.dump() for x in self.stack ], indent=2)
 
     def add_command(self, new_command):
-        if len(self.stack) == 0:
-            self.stack.append(new_command)
-            return
-        command = self.stack[-1]
-        if not command.is_awaiting_values():
-            self.stack.append(new_command)
-            return
-        if not new_command.is_value_modifier:
-            raise Exception(f"Cannot use {new_command} as value modifier")
-        command.add_command(new_command)
+        self.stack.append(new_command)
+        
+        if len(self.stack) > 1:
+            prev_command = self.stack[-2]
+            if prev_command.is_awaiting_values():
+                if not new_command.is_value_modifier:
+                    raise Exception(f"Cannot use {new_command} as value modifier")
+
+            new_command.set_parent(prev_command)
+            prev_command.children.append(new_command)
         
     def add_value(self, value):
         if len(self.stack) == 0:
@@ -244,12 +239,14 @@ class Stack():
         if not command.is_awaiting_values():
             raise Exception(f"Value ({value.value}) added to Command ({command.code}) but command did not expect more values")
         command.handle_value(value)
-        self.rollup()
+        # self.rollup()
         
     def handle_word(self, word):
         if represents_int(word):
             bin = format_block(0, f'{int(word):07b}')
-            self.add_value(Value(value=int(word), format="literal_int", repr_code=bin))
+            # self.blocks.append({"repr_code": bin, "value": int(word)})
+            self.blocks.append(Block(repr_code=bin, value=int(word)))
+            # self.add_value(Value(value=int(word), format="literal_int", repr_code=bin))
             return
 
         MODE="command"
@@ -259,13 +256,46 @@ class Stack():
                 continue
             if MODE == "asci":
                 bin = format_block(0, format(ord(char), '07b'))
-                self.add_value(Value(value=char, format="asci", repr_code=bin))
+                self.blocks.append(Block(repr_code=bin, value=ord(char)))
+                # self.add_value(Value(value=char, format="asci", repr_code=bin))
                 continue
             if MODE == "command":
                 bin = format_block(1, format(ord(char), '07b'))
-                self.add_command(Command(repr_code=bin, code=char, stack=self))
+                # self.blocks.append({"repr_code": bin, "value": char})
+                self.blocks.append(Block(repr_code=bin, value=char))
+                # self.add_command(Command(repr_code=bin, code=char, stack=self))
                 continue
 
+    def parse_messages(self):
+        i = 0;
+        while i < (len(self.blocks)):
+            block = self.blocks[i]
+            msg = Message()
+            self.messages.append(msg)
+
+            if block.value == "n":
+                if i+1 >= len(self.blocks):
+                    raise Exception("UserError: N used but not followed by a value.")
+
+                i += 1; next_block = self.blocks[i]; 
+                num = next_block.value
+                
+                if i+num >= len(self.blocks):
+                    raise Exception(f"UserError: N {num} exceeds length of document")
+                
+
+                msg.header_blocks += [block, next_block]
+                for n in range(num):
+                    i += 1; msg.blocks.append(self.blocks[i])
+
+                i += 1
+                continue
+            msg.value = block.value
+            msg.repr_code = block.repr_code
+            msg.blocks.append(block)
+            i += 1
+            continue
+            
     def rollup(self):
         # during last handle_add_value, the last command (or the last child of the last command, etc) may have gotten its last value
         # this can then lead to a resultant value that should be added to its parent
@@ -295,6 +325,7 @@ def represents_int(s):
 
 def main():
     stack = Stack()
+    
 
     for arg in sys.argv[1:]:
         arg = clean_arg(arg)
@@ -302,11 +333,26 @@ def main():
 
         for word in arg.split(" "):
             stack.handle_word(word)
+
+        stack.parse_messages()
+        
     
-    stack.print()
+    # stack.print()
+    print("blocks")
+    # print(json.dumps(stack.blocks, indent=2, cls=Encoder))
+    print("messages")
+    # print(json.dumps(stack.messages, indent=2, cls=Encoder))
+    for msg in stack.messages:
+        print('---')
+        for block in msg.header_blocks:
+            print(bcolors.DARKGRAY + block.repr_code + bcolors.ENDC, block.value)
+        for block in msg.blocks:
+            print(bcolors.LIGHTGRAY + block.repr_code + bcolors.ENDC, block.value)
+            
+
     # print(stack.dump())
 
-    print("depth:", stack.depth())
+    # print("depth:", stack.depth())
 
 main()
 
